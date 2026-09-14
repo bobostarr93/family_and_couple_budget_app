@@ -1697,7 +1697,7 @@ function renderAccounts(){
       const bal = computeAccountBalance(state, a.id);
       return h("div.card.stat-card", {}, [
         h("div.lbl.uc", {}, [ACCOUNT_TYPES.find(t=>t.value===a.type).label]),
-        h("div.val.num"+(bal<0?" bad":""), { style: bal<0?"color:var(--danger);":"" }, [fmtMoney(bal)]),
+        h("div.val.num"+(bal<0?".bad":""), { style: bal<0?"color:var(--danger);":"" }, [fmtMoney(bal)]),
         h("div.sub", {}, [a.name]),
         h("div.btn-row", { style:"margin-top:10px;" }, [
           h("button.btn.btn-sm.btn-ghost", { onclick:()=>openAccountModal(a) }, [iconEl("edit",{size:13})]),
@@ -2073,7 +2073,8 @@ function openChallengeModal(existing){
 function challengeStreak(ch){
   let streak=0, best=0;
   let d = ch.startDate;
-  while(d<=Math.min(ch.endDate, todayISO())){
+  const cutoff = ch.endDate < todayISO() ? ch.endDate : todayISO();
+  while(d<=cutoff){
     if(ch.checkins[d]){ streak++; best=Math.max(best,streak); } else streak=0;
     d = addDays(d,1);
   }
@@ -2406,7 +2407,7 @@ function renderDashboard(){
     h("div.card.stat-card",{},[h("div.lbl.uc",{},["Current Balance"]),h("div.val.num",{},[fmtMoney(cur)])]),
     h("div.card.stat-card",{},[h("div.lbl.uc",{},["Projected Balance"]),h("div.val.num",{},[fmtMoney(proj)])]),
     h("div.card.stat-card",{},[h("div.lbl.uc",{},["Left to Spend"]),h("div.val.num",{},[fmtMoney(leftSoFar)]),h("div.sub",{},["→ "+fmtMoney(leftProjected)+" projected by month end"])]),
-    h("div.card.stat-card",{},[h("div.lbl.uc",{},["Overdue"]),h("div.val.num"+(computeOverdueCount(state)>0?" bad":""),{style:computeOverdueCount(state)>0?"color:var(--danger);":""},[String(computeOverdueCount(state))]) ]),
+    h("div.card.stat-card",{},[h("div.lbl.uc",{},["Overdue"]),h("div.val.num"+(computeOverdueCount(state)>0?".bad":""),{style:computeOverdueCount(state)>0?"color:var(--danger);":""},[String(computeOverdueCount(state))]) ]),
     renderEssentialSpendCard(state, ym),
     renderEmergencyFundCard(state)
   ]);
