@@ -151,6 +151,7 @@ body::before{
 .summary-strip .stat .val{ font-family:var(--font-serif); font-size:22px; font-weight:700; color:var(--heading); }
 .summary-strip .stat .val.bad{ color:var(--danger); }
 .summary-strip .stat .val.good{ color:var(--sage-dark); }
+.summary-strip .stat .sub{ font-size:11px; color:var(--text-light); margin-top:2px; white-space:nowrap; }
 .summary-strip-right{ margin-left:auto; display:flex; align-items:center; gap:14px; padding:0 18px; }
 .save-indicator{ display:flex; align-items:center; gap:6px; font-size:12.5px; color:var(--text-light); font-weight:600; }
 .save-indicator .dot{ width:7px; height:7px; border-radius:50%; background:var(--success); }
@@ -267,6 +268,8 @@ input[type=checkbox]{ accent-color:var(--sage); width:16px; height:16px; }
 .badge-p2{ background:var(--sage-light); color:var(--sage-dark); }
 .badge-p3{ background:#eee; color:var(--text-lighter); }
 .badge-p4{ background:var(--blush-light); color:var(--blush-dark); }
+.badge-essential{ background:var(--gold-light); color:var(--gold-dark); }
+.essential-dot{ width:6px; height:6px; border-radius:50%; background:var(--gold-dark); display:inline-block; margin-right:4px; vertical-align:middle; flex:0 0 auto; }
 
 .avatar{ width:24px; height:24px; border-radius:50%; display:inline-flex; align-items:center; justify-content:center; color:#fff; font-size:11px; font-weight:700; flex:0 0 auto; }
 
@@ -291,6 +294,8 @@ input[type=checkbox]{ accent-color:var(--sage); width:16px; height:16px; }
 .modal-foot{ display:flex; gap:8px; flex-wrap:wrap; padding:14px 20px; border-top:1px solid var(--border); justify-content:flex-end; }
 .modal-close{ background:none; border:0; font-size:19px; color:var(--text-lighter); line-height:1; padding:4px 6px; }
 
+.fab{ position:fixed; right:24px; bottom:24px; width:54px; height:54px; border-radius:50%; padding:0; display:flex; align-items:center; justify-content:center; z-index:60; box-shadow:var(--shadow-lg); }
+.fab .ico{ width:22px; height:22px; }
 .toast-root{ position:fixed; bottom:18px; right:18px; z-index:200; display:flex; flex-direction:column; gap:8px; }
 .toast{ background:var(--text); color:#fff; padding:11px 18px; border-radius:var(--radius-sm); font-size:14px; box-shadow:var(--shadow-lg); max-width:320px; animation:toastIn .18s ease; }
 @keyframes toastIn{ from{ opacity:0; transform:translateY(6px);} to{ opacity:1; transform:translateY(0);} }
@@ -393,7 +398,7 @@ table.data-table tr:hover .row-actions{ opacity:1; }
 const APP_NAME = "Haven";
 const PRIMARY_KEY = "haven.data.v1";
 const BACKUP_KEY = "haven.data.v1.backup";
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 const CATEGORY_KEYS = ["income","savings","bills","expenses","debtPayments"];
 const SPEND_CATEGORIES = ["bills","expenses","debtPayments"];
 const CATEGORY_LABELS = { income:"Income", savings:"Savings", bills:"Bills", expenses:"Expenses", debtPayments:"Debt Payments" };
@@ -458,7 +463,17 @@ const debouncedPersist = debounce(()=>persistNow(Store.get()), 400);
 function requestSave(){ setSaveStatus("saving"); debouncedPersist(); }
 
 function migrateState(state){
-  // No migrations yet — SCHEMA_VERSION 1 is the first shipped shape.
+  const from = state.schemaVersion || 1;
+  if(from < 2){
+    // v2 batch: essential tag + member % splits on transactions, emergency-fund
+    // flag on sinking funds, variable-income tracking in settings.
+    (state.transactions||[]).forEach(tx=>{
+      if(tx.essential===undefined) tx.essential = false;
+      if(tx.splits===undefined) tx.splits = tx.memberId ? [{ memberId:tx.memberId, percent:100 }] : null;
+    });
+    (state.sinkingFunds||[]).forEach(f=>{ if(f.isEmergencyFund===undefined) f.isEmergencyFund = false; });
+    if(state.settings && state.settings.variableIncomeNames===undefined) state.settings.variableIncomeNames = [];
+  }
   state.schemaVersion = SCHEMA_VERSION;
   return state;
 }
@@ -497,7 +512,7 @@ function defaultCategoryNames(){
   return {
     income:["Paycheck","Side hustle","Gift"],
     savings:["Emergency fund","Retirement"],
-    bills:["Rent/Mortgage","Electricity","Water","Internet","Phone","Insurance"],
+    bills:["Rent/Mortgage","Childcare / Daycare","Electricity","Water","Internet","Phone","Insurance"],
     expenses:["Groceries","Dining out","Fuel","Entertainment","Household"],
     debtPayments:["Credit card","Student loan","Car loan"]
   };
@@ -509,6 +524,7 @@ function defaultSettings(){
     priorityNames: defaultPriorityNames(),
     members: [ {id:uid("mem"), name:"You", color:MEMBER_COLORS[0]}, {id:uid("mem"), name:"Partner", color:MEMBER_COLORS[1]} ],
     ratios: { needs:50, wants:30, savings:20 },
+    variableIncomeNames: [],
     menuVisibility: { guide:true, faq:true },
     onboardingSeen:false,
     seenHelp:{},
@@ -733,6 +749,21 @@ function findAccount(state, id){ return state.accounts.find(a=>a.id===id); }
 function findTx(state, id){ return state.transactions.find(t=>t.id===id); }
 function seriesOf(state, seriesId){ return state.transactions.filter(t=>t.seriesId===seriesId); }
 
+// A transaction can be split 1-2 ways between household members. `splits`
+// is the source of truth when present; `memberId` (kept in sync as
+// splits[0].memberId) is the fallback for any spot not yet migrated to
+// splits-aware totals.
+function txInvolvesMember(tx, memberId){
+  if(tx.splits && tx.splits.length) return tx.splits.some(sp=>sp.memberId===memberId);
+  return tx.memberId===memberId;
+}
+function memberShareOfTx(tx, memberId){
+  if(tx.splits && tx.splits.length){
+    const sp = tx.splits.find(s=>s.memberId===memberId);
+    return sp ? Math.abs(tx.plannedAmount) * (sp.percent/100) : 0;
+  }
+  return tx.memberId===memberId ? Math.abs(tx.plannedAmount) : 0;
+}
 function txSignedAmount(tx){
   const isInflow = tx.category==="income" ? tx.type!=="returned" : tx.type==="refund";
   return isInflow ? Math.abs(tx.plannedAmount) : -Math.abs(tx.plannedAmount);
@@ -769,19 +800,38 @@ function computeOverdueCount(state){
   const today = todayISO();
   return state.transactions.filter(tx=> tx.status==="planned" && tx.dueDate < today).length;
 }
-function computeLeftToSpend(state, ym){
+// "So far": income AND spend both gated by status==="paid" — of what's actually
+// happened this month, where do we stand. Avoids the false-alarm dip mid-month
+// that showed up when unpaid bills due later in the month counted against
+// income that hadn't been received yet.
+function computeLeftToSpendSoFar(state, ym){
+  ym = ym || ymOf(todayISO());
+  let income = 0, cashOut = 0;
+  state.transactions.forEach(tx=>{
+    if(ymOf(tx.dueDate) !== ym || tx.status!=="paid") return;
+    if(tx.category==="income") income += Math.abs(tx.plannedAmount) * (tx.type==="returned" ? -1 : 1);
+    if(SPEND_CATEGORIES.includes(tx.category) && !(tx.category==="bills" && tx.paidWithCard)){
+      cashOut += Math.abs(tx.plannedAmount) * (tx.type==="refund" ? -1 : 1);
+    }
+    if(tx.category==="savings"){
+      cashOut += Math.abs(tx.plannedAmount) * (tx.type==="withdrawal" ? -1 : 1);
+    }
+  });
+  return income - cashOut;
+}
+// "Projected": income AND spend both ungated — where we'll land by month-end
+// if everything goes to plan. Symmetric version of the old (buggy) function.
+function computeLeftToSpendProjected(state, ym){
   ym = ym || ymOf(todayISO());
   let income = 0, cashOut = 0;
   state.transactions.forEach(tx=>{
     if(ymOf(tx.dueDate) !== ym) return;
-    if(tx.category==="income" && tx.status==="paid") income += Math.abs(tx.plannedAmount) * (tx.type==="returned" ? -1 : 1);
+    if(tx.category==="income") income += Math.abs(tx.plannedAmount) * (tx.type==="returned" ? -1 : 1);
     if(SPEND_CATEGORIES.includes(tx.category) && !(tx.category==="bills" && tx.paidWithCard)){
-      const sign = tx.type==="refund" ? -1 : 1;
-      cashOut += Math.abs(tx.plannedAmount) * sign;
+      cashOut += Math.abs(tx.plannedAmount) * (tx.type==="refund" ? -1 : 1);
     }
     if(tx.category==="savings"){
-      const sign = tx.type==="withdrawal" ? -1 : 1;
-      cashOut += Math.abs(tx.plannedAmount) * sign;
+      cashOut += Math.abs(tx.plannedAmount) * (tx.type==="withdrawal" ? -1 : 1);
     }
   });
   return income - cashOut;
@@ -823,7 +873,7 @@ function generateOccurrenceDates(startISO, frequency, interval, endISO, horizonI
 function newTransactionBase(){
   return { id:null, seriesId:null, category:"expenses", name:"", type:"payment", plannedAmount:0,
     dueDate:todayISO(), priority:2, frequency:"oneTime", interval:1, endDate:null, notes:"",
-    status:"planned", paidWithCard:false, memberId:null, accountId:null, createdAt:todayISO() };
+    status:"planned", paidWithCard:false, essential:false, memberId:null, splits:null, accountId:null, createdAt:todayISO() };
 }
 function addTransactionToState(state, data, markFirstPaid){
   const isRecurring = data.frequency !== "oneTime";
@@ -940,7 +990,8 @@ function renderShell(){
     topbarMobile,
     renderBanners(state),
     renderStatusBar(),
-    h("div.content", { id:"routeContent" }, [])
+    h("div.content", { id:"routeContent" }, []),
+    renderFab()
   ]);
 
   app.appendChild(sidebar);
@@ -960,13 +1011,15 @@ function renderStatusBar(){
   const cur = computeCurrentBalance(state);
   const proj = computeProjectedBalance(state);
   const overdue = computeOverdueCount(state);
-  const left = computeLeftToSpend(state);
+  const leftSoFar = computeLeftToSpendSoFar(state);
+  const leftProjected = computeLeftToSpendProjected(state);
   return h("div.summary-strip", { id:"summaryStrip" }, [
     h("div.stat", {}, [ h("div.lbl.uc", {}, ["Current Balance"]), h("div.val.num"+(cur<0?".bad":""), {}, [fmtMoney(cur)]) ]),
     h("div.stat", {}, [ h("div.lbl.uc", {}, ["Projected Balance"]), h("div.val.num"+(proj<0?".bad":""), {}, [fmtMoney(proj)]) ]),
     h("div.stat", {}, [ h("div.lbl.uc", {}, ["Overdue"]), h("div.val.num"+(overdue>0?".bad":""), {}, [String(overdue)]) ]),
-    h("div.stat", {}, [ h("div.lbl.uc", {}, ["Left to Spend"]), h("div.val.num"+(left<0?".bad":".good"), {}, [fmtMoney(left)]),
-      h("span.help-icon", { title:"Left to Spend = income received this month, minus cash bills/expenses/debt payments due this month (credit-card bills excluded), minus savings contributions." }, ["?"]) ]),
+    h("div.stat", {}, [ h("div.lbl.uc", {}, ["Left to Spend"]), h("div.val.num"+(leftSoFar<0?".bad":".good"), {}, [fmtMoney(leftSoFar)]),
+      h("div.sub", {}, ["→ "+fmtMoney(leftProjected)+" projected by month end"]),
+      h("span.help-icon", { title:"\"Left to Spend\" counts only what's actually happened so far this month (paid income minus paid bills/expenses/debt payments/savings). The line underneath projects where you'll land by month-end if every planned transaction goes as scheduled." }, ["?"]) ]),
     h("div.stat", {}, [ h("div.lbl.uc", {}, ["Today"]), h("div.val", { style:"font-size:16px;" }, [fmtDate(todayISO())]) ]),
     h("div.summary-strip-right", {}, [ renderSaveIndicator() ])
   ]);
@@ -1020,7 +1073,7 @@ function renderBanners(state){
     const dismissedUntil = state.settings.backupReminderDismissedUntil;
     const needsReminder = (!lastExport || daysSince(lastExport) >= BACKUP_REMINDER_DAYS) && (!dismissedUntil || dismissedUntil < todayISO());
     if(needsReminder && (state.transactions.length>0 || state.accounts.length>0)){
-      nodes.push(h("div.banner.banner-gold", {}, [ "It's been a while since your last backup. Haven never syncs to the cloud, so exporting is the only way to protect your data.",
+      nodes.push(h("div.banner.banner-gold", {}, [ "It's been a while since your last backup. Haven never syncs to the cloud — export or share a copy with your partner to keep your data safe.",
         h("button", { onclick:()=>{ Router.go("backup"); } }, ["Export now"]),
         h("button", { onclick:(e)=>{ Store.mutate(s=>{ s.settings.backupReminderDismissedUntil = addDays(todayISO(),7); }); e.target.closest(".banner").remove(); } }, ["Remind me later"])
       ]));
@@ -1181,6 +1234,9 @@ function bandCard(categoryKey, title, bodyChildren){
 }
 
 /* ===== SECTION: ADD / EDIT TRANSACTION MODAL ===== */
+// Not persisted — just remembered for this browser session so Quick Add can
+// default to whichever account was most recently used.
+let lastUsedAccountId = null;
 function categoryOptions(){ return CATEGORY_KEYS.map(k=>({ value:k, label:CATEGORY_LABELS[k] })); }
 function accountOptions(state){ return state.accounts.map(a=>({ value:a.id, label:a.name })); }
 function memberOptions(state){ return state.settings.members.map(m=>({ value:m.id, label:m.name })); }
@@ -1191,6 +1247,46 @@ function typeOptionsFor(category){
   return [{value:"payment",label:"Payment"},{value:"refund",label:"Refund"}];
 }
 function nameOptionsFor(state, category){ return (state.settings.categoryNames[category]||[]); }
+// A transaction can be assigned to up to 2 household members with a percent
+// split (always summing to 100, default 50/50). `rerenderBody` re-renders the
+// modal body so the percent slider appears/disappears as selections change.
+function memberSplitField(state, form, rerenderBody){
+  const members = state.settings.members;
+  const selectedIds = (form.splits||[]).map(sp=>sp.memberId);
+  const chips = members.map(m=>{
+    const active = selectedIds.includes(m.id);
+    return h("span.chip"+(active?".active":""), { onclick:()=>{
+      let ids = selectedIds.slice();
+      if(active){ ids = ids.filter(id=>id!==m.id); }
+      else { if(ids.length>=2) ids.shift(); ids.push(m.id); }
+      if(ids.length===0){ form.splits=null; form.memberId=null; }
+      else if(ids.length===1){ form.splits=[{memberId:ids[0],percent:100}]; form.memberId=ids[0]; }
+      else { form.splits=[{memberId:ids[0],percent:50},{memberId:ids[1],percent:50}]; form.memberId=ids[0]; }
+      rerenderBody();
+    } }, [m.name]);
+  });
+  const rows = [
+    h("label",{},["Household member(s)"]),
+    h("div.btn-row", {}, chips.length ? chips : [h("span.muted.tiny",{},["Add household members in Settings first."])]),
+    h("div.hint", {}, ["Select up to 2 — leave none selected to keep this unassigned."])
+  ];
+  if(form.splits && form.splits.length===2){
+    const a = form.splits[0], b = form.splits[1];
+    const memberA = members.find(m=>m.id===a.memberId), memberB = members.find(m=>m.id===b.memberId);
+    let pctLabelEl;
+    rows.push(
+      h("div.field", { style:"margin-top:10px;" }, [
+        h("label",{},["Split"]),
+        h("input", { type:"range", min:"0", max:"100", value:a.percent, oninput:(e)=>{
+          const pct = Number(e.target.value); a.percent = pct; b.percent = 100-pct;
+          if(pctLabelEl) pctLabelEl.textContent = (memberA?memberA.name:"")+": "+pct+"% · "+(memberB?memberB.name:"")+": "+(100-pct)+"%";
+        } }),
+        (pctLabelEl = h("div.hint", {}, [(memberA?memberA.name:"")+": "+a.percent+"% · "+(memberB?memberB.name:"")+": "+b.percent+"%"]))
+      ])
+    );
+  }
+  return h("div.field", {}, rows);
+}
 
 function field(labelText, inputEl, hint, helpText){
   return h("div.field", {}, [
@@ -1235,15 +1331,17 @@ function openTransactionModal(existingTx, opts){
         h("input", { type:"checkbox", checked:!!form.paidWithCard, onchange:(e)=>form.paidWithCard=e.target.checked }),
         h("span", {}, ["Paid with credit card? (counts in Bills totals, excluded from cash available)"])
       ]) : null,
+      isSpend ? h("label.checkbox-field", {}, [
+        h("input", { type:"checkbox", checked:!!form.essential, onchange:(e)=>form.essential=e.target.checked }),
+        h("span", {}, ["Essential (childcare, rent, insurance…)"])
+      ]) : null,
       h("div.field-row", {}, [
         field("Frequency", selectEl(RECUR_FREQS, form.frequency, v=>{ form.frequency=v; renderModalBody(); })),
         form.frequency!=="oneTime" ? field("Repeat every", h("input", { type:"number", min:"1", value:form.interval, oninput:(e)=>form.interval=Math.max(1,parseInt(e.target.value)||1) })) : null
       ]),
       form.frequency!=="oneTime" ? field("End date (optional)", h("input", { type:"date", value:form.endDate||"", oninput:(e)=>form.endDate=e.target.value||null }), "Recurring transactions generate every future occurrence automatically, up to 2 years out.") : null,
-      h("div.field-row", {}, [
-        field("Household member", selectEl([{value:"",label:"Unassigned"}].concat(memberOptions(state)), form.memberId||"", v=>form.memberId=v||null)),
-        field("Account", selectEl([{value:"",label:"No account"}].concat(accountOptions(state)), form.accountId||"", v=>form.accountId=v||null))
-      ]),
+      memberSplitField(state, form, renderModalBody),
+      field("Account", selectEl([{value:"",label:"No account"}].concat(accountOptions(state)), form.accountId||"", v=>form.accountId=v||null)),
       field("Notes", h("textarea", { oninput:(e)=>form.notes=e.target.value }, [form.notes||""]))
     ];
     return h("div", {}, rows);
@@ -1256,6 +1354,7 @@ function openTransactionModal(existingTx, opts){
   function doSave(markPaid, andAddAnother){
     if(!form.name.trim()){ toast("Please enter a name."); return; }
     if(!form.plannedAmount || form.plannedAmount<=0){ toast("Please enter an amount greater than zero."); return; }
+    if(form.accountId) lastUsedAccountId = form.accountId;
     Store.mutate(s=>{
       if(isEdit){
         const changes = Object.assign({}, form);
@@ -1320,6 +1419,54 @@ function quickTransactionPopup(tx){
   });
 }
 
+/* ===== SECTION: QUICK ADD (fast checkout-line entry) ===== */
+function mostRecentNameForCategory(state, category){
+  const list = state.transactions.filter(t=>t.category===category);
+  if(list.length===0) return nameOptionsFor(state, category)[0] || "";
+  const latest = list.reduce((a,b)=> (b.createdAt||b.dueDate) > (a.createdAt||a.dueDate) ? b : a);
+  return latest.name;
+}
+function openQuickAddModal(){
+  const state = Store.get();
+  const form = { category:"expenses", name: mostRecentNameForCategory(state,"expenses"), amount:0 };
+  function renderBody(){
+    return h("div", {}, [
+      field("Category", selectEl(categoryOptions(), form.category, v=>{ form.category=v; form.name=mostRecentNameForCategory(Store.get(), v); renderModalBody(); })),
+      field("Name", h("input",{ type:"text", value:form.name, oninput:(e)=>form.name=e.target.value })),
+      field("Amount", h("input",{ type:"number", step:"0.01", min:"0", value:form.amount, autofocus:true, oninput:(e)=>form.amount=parseFloat(e.target.value)||0 }))
+    ]);
+  }
+  function renderModalBody(){
+    const bodyEl = document.querySelector(".modal-body");
+    if(bodyEl){ bodyEl.innerHTML=""; bodyEl.appendChild(renderBody()); }
+  }
+  openModal({
+    title:"Quick Add",
+    body:[ renderBody() ],
+    footer:[
+      h("button.btn", { onclick:()=>closeModal() }, ["Cancel"]),
+      h("button.btn.btn-primary", { onclick:()=>{
+        if(!form.amount || form.amount<=0){ toast("Please enter an amount greater than zero."); return; }
+        const name = form.name.trim() || CATEGORY_LABELS[form.category];
+        const data = Object.assign(newTransactionBase(), {
+          category: form.category, name, plannedAmount: form.amount,
+          type: typeOptionsFor(form.category)[0].value,
+          dueDate: todayISO(), status:"paid", frequency:"oneTime", priority:2,
+          memberId:null, accountId: lastUsedAccountId
+        });
+        if(data.accountId) lastUsedAccountId = data.accountId;
+        Store.mutate(s=> addTransactionToState(s, data, false));
+        toast("Transaction saved.");
+        closeModal();
+        refreshShellChrome(); mountRoute();
+      } }, ["Save"])
+    ]
+  });
+}
+function renderFab(){
+  return h("button.fab.btn.btn-primary", { onclick:()=>openQuickAddModal(), title:"Quick add a transaction" }, [iconEl("add",{size:22})]);
+}
+
 /* ===== SECTION: PRINT SNAPSHOT ===== */
 function printSnapshot(titleText, bodyNode){
   const area = document.getElementById("print-area");
@@ -1336,7 +1483,7 @@ function txMatchesCalFilter(tx){
   if(calFilters.status && deriveStatusLabel(tx)!==calFilters.status) return false;
   if(calFilters.priority!=="" && String(tx.priority)!==calFilters.priority) return false;
   if(calFilters.category && tx.category!==calFilters.category) return false;
-  if(calFilters.member && tx.memberId!==calFilters.member) return false;
+  if(calFilters.member && !txInvolvesMember(tx, calFilters.member)) return false;
   return true;
 }
 
@@ -1374,7 +1521,7 @@ function renderCalendar(params){
         draggable:true,
         ondragstart:(e)=>{ e.dataTransfer.setData("text/plain", tx.id); },
         onclick:(e)=>{ e.stopPropagation(); quickTransactionPopup(tx); }
-      }, [tx.name+" "+fmtMoney(tx.plannedAmount)])),
+      }, [tx.essential? h("span.essential-dot",{title:"Essential"}) : null, tx.name+" "+fmtMoney(tx.plannedAmount)])),
       dayTx.length>3 ? h("div.cal-more", {}, ["+"+(dayTx.length-3)+" more"]) : null
     ]);
     cells.push(cell);
@@ -1429,7 +1576,7 @@ function renderTransactionsList(){
   if(listFilters.priority!=="") list = list.filter(t=>String(t.priority)===listFilters.priority);
   if(listFilters.category) list = list.filter(t=>t.category===listFilters.category);
   if(listFilters.account) list = list.filter(t=>t.accountId===listFilters.account);
-  if(listFilters.member) list = list.filter(t=>t.memberId===listFilters.member);
+  if(listFilters.member) list = list.filter(t=>txInvolvesMember(t, listFilters.member));
   if(listFilters.month) list = list.filter(t=>ymOf(t.dueDate)===listFilters.month);
   if(listFilters.year) list = list.filter(t=>String(yearOf(t.dueDate))===listFilters.year);
 
@@ -1458,12 +1605,12 @@ function renderTransactionsList(){
         h("thead", {}, [ h("tr", {}, ["Date","Name","Category","Member","Amount","Status","Actions"].map(l=>h("th",{},[l]))) ]),
         h("tbody", {}, list.map(tx=>{
           const status = deriveStatusLabel(tx);
-          const member = tx.memberId ? state.settings.members.find(m=>m.id===tx.memberId) : null;
+          const splitMembers = tx.splits && tx.splits.length ? tx.splits.map(sp=>state.settings.members.find(m=>m.id===sp.memberId)).filter(Boolean) : (tx.memberId ? [state.settings.members.find(m=>m.id===tx.memberId)].filter(Boolean) : []);
           return h("tr", {}, [
             h("td", {}, [fmtDate(tx.dueDate)]),
             h("td", { style:"cursor:pointer;font-weight:600;", onclick:()=>openTransactionModal(tx, { onSaved: refreshCurrentRoute }) }, [tx.name]),
-            h("td", {}, [ h("span.badge.badge-"+tx.category, {}, [CATEGORY_LABELS[tx.category]]) ]),
-            h("td", {}, [ member ? h("span.avatar", { style:"background:"+member.color+";" }, [member.name[0]]) : "—" ]),
+            h("td", {}, [ h("span.badge.badge-"+tx.category, {}, [CATEGORY_LABELS[tx.category]]), tx.essential? h("span.badge.badge-essential",{style:"margin-left:4px;"},["Essential"]) : null ]),
+            h("td", {}, splitMembers.length ? splitMembers.map(m=> h("span.avatar", { style:"background:"+m.color+";margin-right:3px;", title: tx.splits&&tx.splits.length===2 ? m.name+" ("+(tx.splits.find(sp=>sp.memberId===m.id)||{}).percent+"%)" : m.name }, [m.name[0]])) : ["—"]),
             h("td.num", {}, [fmtMoney(tx.plannedAmount)]),
             h("td", {}, [ h("span.badge.badge-"+status, {}, [STATUS_LABELS[status]||status]) ]),
             h("td", {}, [ h("div.row-actions", {}, [
@@ -1583,14 +1730,24 @@ function fundForecastDate(fund){
   const monthsNeeded = Math.ceil(remaining/perMonth);
   return "≈ "+fmtDate(addMonths(todayISO(), monthsNeeded))+" at this pace";
 }
-function openFundModal(existing){
-  const form = existing ? deepClone(existing) : { id:null, name:"", targetAmount:1000, targetDate:addMonths(todayISO(),12), contributions:[] };
+function openFundModal(existing, seed){
+  const form = existing ? deepClone(existing) : Object.assign({ id:null, name:"", targetAmount:1000, targetDate:addMonths(todayISO(),12), contributions:[], isEmergencyFund:false }, seed||{});
   openModal({
     title: existing?"Edit sinking fund":"Add sinking fund",
     body:[
       field("Goal name", h("input",{type:"text",value:form.name,oninput:(e)=>form.name=e.target.value})),
       field("Target amount", h("input",{type:"number",step:"0.01",value:form.targetAmount,oninput:(e)=>form.targetAmount=parseFloat(e.target.value)||0})),
-      field("Target date", h("input",{type:"date",value:form.targetDate,oninput:(e)=>form.targetDate=e.target.value}))
+      field("Target date", h("input",{type:"date",value:form.targetDate,oninput:(e)=>form.targetDate=e.target.value})),
+      h("label.checkbox-field",{},[
+        h("input",{type:"checkbox", checked:!!form.isEmergencyFund, onchange:(e)=>{
+          form.isEmergencyFund = e.target.checked;
+          if(e.target.checked){
+            Store.mutate(s=>{ s.sinkingFunds.forEach(f=>{ if(!existing || f.id!==existing.id) f.isEmergencyFund=false; }); });
+          }
+        }}),
+        h("span",{},["This is our emergency fund."])
+      ]),
+      h("p.hint",{},["Only one fund can be flagged as the emergency fund — Haven uses it to estimate months of coverage on the Dashboard and Net Worth pages."])
     ],
     footer:[ h("button.btn",{onclick:()=>closeModal()},["Cancel"]),
       h("button.btn.btn-primary",{onclick:()=>{
@@ -1599,6 +1756,18 @@ function openFundModal(existing){
         closeModal(); renderSinkingFunds();
       }},["Save"]) ]
   });
+}
+const FUND_SUGGESTIONS = [
+  { name:"Back to School",  targetAmount:600,  monthsOut:11 },
+  { name:"Birthdays",       targetAmount:400,  monthsOut:12 },
+  { name:"Holiday Gifts",   targetAmount:800,  monthsOut:12 },
+  { name:"Summer Camp",     targetAmount:900,  monthsOut:9  },
+  { name:"Family Vacation", targetAmount:2500, monthsOut:10 }
+];
+function fundSuggestionChips(){
+  return h("div.btn-row", { style:"margin-bottom:16px;" }, FUND_SUGGESTIONS.map(sug=>
+    h("span.chip", { onclick:()=>openFundModal(null, { name:sug.name, targetAmount:sug.targetAmount, targetDate:addMonths(todayISO(), sug.monthsOut) }) }, [sug.name])
+  ));
 }
 function addContributionPrompt(fund){
   const form = { amount:0, date:todayISO() };
@@ -1619,7 +1788,11 @@ function renderSinkingFunds(){
   const toolbar = h("div.toolbar", {}, [ h("h2",{},["Sinking Funds & Savings Goals"]), h("div.spacer",{}), h("button.btn.btn-primary",{onclick:()=>openFundModal(null)},[iconEl("add",{size:14}),"Add goal"]) ]);
   let body;
   if(state.sinkingFunds.length===0){
-    body = h("div.empty-state",{},[ h("div.big",{},[iconEl("sinkingFunds",{size:34})]), h("p",{},["No savings goals yet. Create one for anything you're setting money aside for — a vacation, a new car, a holiday fund."]) ]);
+    body = h("div", {}, [
+      h("p.muted",{style:"margin-bottom:10px;"},["Not sure where to start? Tap a suggestion to pre-fill a goal, then tweak the numbers:"]),
+      fundSuggestionChips(),
+      h("div.empty-state",{},[ h("div.big",{},[iconEl("sinkingFunds",{size:34})]), h("p",{},["No savings goals yet. Create one for anything you're setting money aside for — a vacation, a new car, a holiday fund."]) ])
+    ]);
   } else {
     body = h("div.card-grid", {}, state.sinkingFunds.map(fund=>{
       const saved = fundSaved(fund);
@@ -1785,7 +1958,8 @@ function renderNetWorth(){
   const stats = h("div.card-grid", {}, [
     h("div.card.stat-card",{},[h("div.lbl.uc",{},["Assets"]),h("div.val.num",{},[fmtMoney(live.assets)])]),
     h("div.card.stat-card",{},[h("div.lbl.uc",{},["Liabilities"]),h("div.val.num",{style:"color:var(--danger);"},[fmtMoney(live.liabilities)])]),
-    h("div.card.stat-card",{},[h("div.lbl.uc",{},["Net Worth"]),h("div.val.num",{},[fmtMoney(live.net)])])
+    h("div.card.stat-card",{},[h("div.lbl.uc",{},["Net Worth"]),h("div.val.num",{},[fmtMoney(live.net)])]),
+    renderEmergencyFundCard(state)
   ]);
   const editors = h("div.card-grid", {}, [
     h("div.card", {}, [ h("h3",{},["Other assets"]), manualEntryEditor(state.extraAssets, ()=>{ Store.mutate(s=>{}); renderNetWorth(); }) ]),
@@ -1959,7 +2133,7 @@ function categoryPanel(state, ym, cat, rec){
     : h("table.data-table",{},[
         h("thead",{},[h("tr",{},["Name","Planned","Paid"].map(l=>h("th",{},[l])))]),
         h("tbody",{}, txList.map(tx=> h("tr",{style:"cursor:pointer;",onclick:()=>openTransactionModal(tx,{onSaved:()=>renderMonthlyInsights([ym])})},[
-          h("td",{},[tx.name]), h("td.num",{},[fmtMoney(tx.plannedAmount)]), h("td.num",{},[tx.status==="paid"?fmtMoney(tx.plannedAmount):"—"])
+          h("td",{},[tx.name, tx.essential? h("span.badge.badge-essential",{style:"margin-left:6px;"},["Essential"]) : null]), h("td.num",{},[fmtMoney(tx.plannedAmount)]), h("td.num",{},[tx.status==="paid"?fmtMoney(tx.plannedAmount):"—"])
         ]))),
         h("tfoot",{},[h("tr",{},[h("td",{},["Total"]),h("td.num",{},[fmtMoney(totals.planned)]),h("td.num",{},[fmtMoney(totals.paid)])])])
       ]);
@@ -1987,9 +2161,10 @@ function renderMonthlyInsights(params){
   const rollover = h("div.card", {}, [ field("Rollover from last month", h("input",{type:"number",step:"0.01",value:rec.rolloverIn,oninput:(e)=>{ rec.rolloverIn=parseFloat(e.target.value)||0; Store.mutate(s=>{}); refreshShellChrome(); }})) ]);
   const grid = h("div.card-grid", {}, CATEGORY_KEYS.map(cat=>categoryPanel(state, ym, cat, rec)));
 
-  // per-member split
-  const memberTx = state.transactions.filter(t=>ymOf(t.dueDate)===ym && t.memberId);
-  const memberSegs = state.settings.members.map((m,i)=>({ label:m.name, value: memberTx.filter(t=>t.memberId===m.id && SPEND_CATEGORIES.includes(t.category)).reduce((s,t)=>s+Math.abs(t.plannedAmount),0), color:m.color }));
+  // per-member split (splits-aware: a 2-way split transaction contributes its
+  // percentage share to each involved member, not the full amount twice)
+  const monthTxAll = state.transactions.filter(t=>ymOf(t.dueDate)===ym);
+  const memberSegs = state.settings.members.map(m=>({ label:m.name, value: monthTxAll.filter(t=>txInvolvesMember(t,m.id) && SPEND_CATEGORIES.includes(t.category)).reduce((s,t)=>s+memberShareOfTx(t,m.id),0), color:m.color }));
   const memberPanel = memberSegs.some(s=>s.value>0) ? chartCard("Per-member spending", donutChart(memberSegs,{size:140}), chartLegend(memberSegs)) : null;
 
   // 50/30/20 donut for the month
@@ -2061,14 +2236,37 @@ function bucketTotals(transactions){
   });
   return totals;
 }
+// Variable/irregular income (e.g. freelance top-ups) is excluded from the
+// denominator that drives ratios/targets, so a lump-sum month doesn't make
+// the budget look artificially healthy and a lean month doesn't look like a
+// crisis — only the household's dependable income drives the percentages.
+function computeReliableMonthlyIncome(state, ym){
+  ym = ym || ymOf(todayISO());
+  const variable = state.settings.variableIncomeNames||[];
+  return categoryTxForMonth(state, ym, "income").filter(tx=>tx.status==="paid" && !variable.includes(tx.name))
+    .reduce((s,tx)=> s + Math.abs(tx.plannedAmount)*(tx.type==="returned"?-1:1), 0);
+}
+function computeVariableIncomeAverage(state, ym){
+  ym = ym || ymOf(todayISO());
+  const variable = state.settings.variableIncomeNames||[];
+  let total = 0;
+  for(let i=0;i<3;i++){
+    const m = addMonths(ym+"-01", -i).slice(0,7);
+    total += categoryTxForMonth(state, m, "income").filter(tx=>tx.status==="paid" && variable.includes(tx.name))
+      .reduce((s,tx)=> s + Math.abs(tx.plannedAmount)*(tx.type==="returned"?-1:1), 0);
+  }
+  return total/3;
+}
 function render503020(){
   const state = Store.get();
   const ratios = state.settings.ratios;
   const ym = ymOf(todayISO());
   const monthTx = state.transactions.filter(t=>ymOf(t.dueDate)===ym);
   const buckets = bucketTotals(monthTx);
-  const income = categoryTotals(categoryTxForMonth(state,ym,"income")).paid || 1;
+  const income = computeReliableMonthlyIncome(state, ym) || 1;
+  const variableAvg = computeVariableIncomeAverage(state, ym);
   const toolbar = h("div.toolbar",{},[ h("h2",{},["50/30/20 Split"]), h("div.spacer",{}) ]);
+  const variableLine = variableAvg>0 ? h("p.muted.tiny", {}, ["+ ~"+fmtMoney(variableAvg)+"/mo from variable income (3-mo avg) — not counted in the ratios above"]) : null;
   const controls = h("div.card", {}, [
     h("h3",{},["Target ratios"]),
     h("div.field-row", {}, [
@@ -2088,54 +2286,129 @@ function render503020(){
       h("p",{},[ "Actual: "+actualPct.toFixed(1)+"% ("+fmtMoney(buckets[k])+") · Target: "+targetPct+"%" ])
     ]);
   });
-  mountContent(h("div", {}, [toolbar, controls, h("div.card-grid",{},rows)]));
+  mountContent(h("div", {}, [toolbar, controls, variableLine, h("div.card-grid",{},rows)].filter(Boolean)));
 }
 registerRoute("budget-503020", render503020);
 
 /* ===== SECTION: MULTI-MEMBER / HOUSEHOLD SPLIT VIEW ===== */
 let memberSplitMonth = ymOf(todayISO());
+let memberSplitViewMode = "$"; // "$" or "%" (share of that member's own income)
 function renderMemberSplit(){
   const state = Store.get();
   const ym = memberSplitMonth;
   const toolbar = h("div.cal-toolbar", {}, [
     h("button.btn.btn-sm", { onclick:()=>{ memberSplitMonth=addMonths(ym+"-01",-1).slice(0,7); renderMemberSplit(); } }, [iconEl("chevronLeft",{size:13})]),
     h("h2", {}, ["Household Split — "+monthName(ym)]),
-    h("button.btn.btn-sm", { onclick:()=>{ memberSplitMonth=addMonths(ym+"-01",1).slice(0,7); renderMemberSplit(); } }, [iconEl("chevronRight",{size:13})])
+    h("button.btn.btn-sm", { onclick:()=>{ memberSplitMonth=addMonths(ym+"-01",1).slice(0,7); renderMemberSplit(); } }, [iconEl("chevronRight",{size:13})]),
+    h("div.btn-row", { style:"margin-left:auto;" }, [
+      h("button.btn.btn-sm"+(memberSplitViewMode==="$"?".btn-primary":""), { onclick:()=>{ memberSplitViewMode="$"; renderMemberSplit(); } }, ["$"]),
+      h("button.btn.btn-sm"+(memberSplitViewMode==="%"?".btn-primary":""), { onclick:()=>{ memberSplitViewMode="%"; renderMemberSplit(); } }, ["% of income"])
+    ])
   ]);
   if(state.settings.members.length===0){
     mountContent(h("div",{},[toolbar, h("div.empty-state",{},[h("p",{},["Add household members in Settings to see a per-person breakdown."])])]));
     return;
   }
   const monthTx = state.transactions.filter(t=>ymOf(t.dueDate)===ym);
-  const segs = state.settings.members.map(m=>({ label:m.name, value: monthTx.filter(t=>t.memberId===m.id && SPEND_CATEGORIES.includes(t.category)).reduce((s,t)=>s+Math.abs(t.plannedAmount),0), color:m.color }));
+  const spendOf = m => monthTx.filter(t=>txInvolvesMember(t,m.id) && SPEND_CATEGORIES.includes(t.category)).reduce((s,t)=>s+memberShareOfTx(t,m.id),0);
+  const incomeOf = m => monthTx.filter(t=>txInvolvesMember(t,m.id) && t.category==="income").reduce((s,t)=>s+memberShareOfTx(t,m.id),0);
   const unassigned = monthTx.filter(t=>!t.memberId && SPEND_CATEGORIES.includes(t.category)).reduce((s,t)=>s+Math.abs(t.plannedAmount),0);
-  if(unassigned>0) segs.push({ label:"Unassigned", value:unassigned, color:"#a49b8f" });
-  const chart = chartCard("Spending by household member", donutChart(segs,{size:160}), chartLegend(segs));
+
+  let chart;
+  if(memberSplitViewMode==="%"){
+    const bars = state.settings.members.map(m=>{
+      const income = incomeOf(m);
+      const pct = income>0 ? (spendOf(m)/income*100) : 0;
+      return { label:m.name, value: pct, color:m.color };
+    });
+    chart = chartCard("Spend as % of each member's own income", barChart(bars), h("p.muted.tiny",{},["A member with $0 income this month shows 0% here — see the $ view for their raw spend."]));
+  } else {
+    const segs = state.settings.members.map(m=>({ label:m.name, value: spendOf(m), color:m.color }));
+    if(unassigned>0) segs.push({ label:"Unassigned", value:unassigned, color:"#a49b8f" });
+    chart = chartCard("Spending by household member", donutChart(segs,{size:160}), chartLegend(segs));
+  }
 
   const perMemberTables = state.settings.members.map(m=>{
-    const tx = monthTx.filter(t=>t.memberId===m.id);
-    const income = tx.filter(t=>t.category==="income").reduce((s,t)=>s+Math.abs(t.plannedAmount),0);
-    const spend = tx.filter(t=>SPEND_CATEGORIES.includes(t.category)).reduce((s,t)=>s+Math.abs(t.plannedAmount),0);
+    const income = incomeOf(m), spend = spendOf(m);
+    const pctOfIncome = income>0 ? (spend/income*100).toFixed(1)+"%" : "—";
     return h("div.card", {}, [
       h("div.toolbar",{style:"margin-bottom:6px;"},[ h("span.avatar",{style:"background:"+m.color+";"},[m.name[0]]), h("h3",{style:"margin:0 0 0 8px;"},[m.name]) ]),
       h("p",{},["Income: ", h("span.num",{},[fmtMoney(income)])]),
-      h("p",{},["Spend: ", h("span.num",{},[fmtMoney(spend)])])
+      h("p",{},["Spend: ", h("span.num",{},[fmtMoney(spend)])]),
+      h("p.muted.tiny",{},["Spend is "+pctOfIncome+" of this member's income"])
     ]);
   });
   mountContent(h("div", {}, [toolbar, chart, h("div.card-grid",{},perMemberTables)]));
 }
 registerRoute("member-split", renderMemberSplit);
 
+/* ===== SECTION: ESSENTIAL SPEND & EMERGENCY FUND COVERAGE ===== */
+function computeEssentialSpend(state, ym){
+  ym = ym || ymOf(todayISO());
+  return state.transactions.filter(t=>ymOf(t.dueDate)===ym && t.essential===true)
+    .reduce((s,t)=> s + Math.abs(t.plannedAmount)*(t.type==="refund"?-1:1), 0);
+}
+function renderEssentialSpendCard(state, ym){
+  const total = computeEssentialSpend(state, ym);
+  return h("div.card.stat-card", {}, [
+    h("div.lbl.uc", {}, ["Essential Spend This Month"]),
+    h("div.val.num", {}, [fmtMoney(total)]),
+    h("div.sub", {}, ["Childcare, rent, insurance — anything marked Essential"])
+  ]);
+}
+// avgMonthlyEssentialSpend: average of the last 3 fully-completed months' Bills +
+// Debt Payments totals (BUCKET_MAP's "needs" bucket), falling back to the
+// current month if fewer than 3 months of history exist.
+function computeEmergencyCoverageMonths(state){
+  const fund = state.sinkingFunds.find(f=>f.isEmergencyFund);
+  if(!fund) return null;
+  const saved = fundSaved(fund);
+  const ym = ymOf(todayISO());
+  let total = 0, count = 0;
+  for(let i=1;i<=3;i++){
+    const m = addMonths(ym+"-01", -i).slice(0,7);
+    const needsTx = categoryTxForMonth(state, m, "bills").concat(categoryTxForMonth(state, m, "debtPayments"));
+    if(needsTx.length>0){ total += categoryTotals(needsTx).paid; count++; }
+  }
+  let avgMonthlyEssentialSpend;
+  if(count>0) avgMonthlyEssentialSpend = total/count;
+  else {
+    const curNeeds = categoryTxForMonth(state, ym, "bills").concat(categoryTxForMonth(state, ym, "debtPayments"));
+    avgMonthlyEssentialSpend = categoryTotals(curNeeds).paid;
+  }
+  if(avgMonthlyEssentialSpend<=0) return 0;
+  return saved/avgMonthlyEssentialSpend;
+}
+function renderEmergencyFundCard(state){
+  const months = computeEmergencyCoverageMonths(state);
+  if(months===null){
+    return h("div.card.stat-card", {}, [
+      h("div.lbl.uc", {}, ["Emergency Fund"]),
+      h("div.val", { style:"font-size:17px;color:var(--text-light);" }, ["Not set up yet"]),
+      h("div.sub", {}, [ h("a", { href:"#/sinking-funds" }, ["Set one up in Sinking Funds →"]) ])
+    ]);
+  }
+  const zero = months<=0;
+  return h("div.card.stat-card", {}, [
+    h("div.lbl.uc", {}, ["Emergency Fund Covers"]),
+    h("div.val.num", { style: zero?"color:var(--danger);":"" }, [months.toFixed(1)+" months"]),
+    h("div.sub", {}, ["Most advisors recommend 3–6 months."])
+  ]);
+}
+
 /* ===== SECTION: OVERVIEW DASHBOARD (landing page) ===== */
 function renderDashboard(){
   const state = Store.get();
   const ym = ymOf(todayISO());
-  const cur = computeCurrentBalance(state), proj = computeProjectedBalance(state), left = computeLeftToSpend(state);
+  const cur = computeCurrentBalance(state), proj = computeProjectedBalance(state);
+  const leftSoFar = computeLeftToSpendSoFar(state), leftProjected = computeLeftToSpendProjected(state);
   const stats = h("div.card-grid", {}, [
     h("div.card.stat-card",{},[h("div.lbl.uc",{},["Current Balance"]),h("div.val.num",{},[fmtMoney(cur)])]),
     h("div.card.stat-card",{},[h("div.lbl.uc",{},["Projected Balance"]),h("div.val.num",{},[fmtMoney(proj)])]),
-    h("div.card.stat-card",{},[h("div.lbl.uc",{},["Left to Spend"]),h("div.val.num",{},[fmtMoney(left)])]),
-    h("div.card.stat-card",{},[h("div.lbl.uc",{},["Overdue"]),h("div.val.num"+(computeOverdueCount(state)>0?" bad":""),{style:computeOverdueCount(state)>0?"color:var(--danger);":""},[String(computeOverdueCount(state))]) ])
+    h("div.card.stat-card",{},[h("div.lbl.uc",{},["Left to Spend"]),h("div.val.num",{},[fmtMoney(leftSoFar)]),h("div.sub",{},["→ "+fmtMoney(leftProjected)+" projected by month end"])]),
+    h("div.card.stat-card",{},[h("div.lbl.uc",{},["Overdue"]),h("div.val.num"+(computeOverdueCount(state)>0?" bad":""),{style:computeOverdueCount(state)>0?"color:var(--danger);":""},[String(computeOverdueCount(state))]) ]),
+    renderEssentialSpendCard(state, ym),
+    renderEmergencyFundCard(state)
   ]);
   const segs = CATEGORY_KEYS.filter(c=>c!=="income").map(cat=>({ label:CATEGORY_LABELS[cat], value:categoryTotals(categoryTxForMonth(state,ym,cat)).planned, color:getComputedStyle(document.documentElement).getPropertyValue ? null : null }));
   const catColors = { savings:"#e3b7bb", bills:"#c9a86a", expenses:"#b98a63", debtPayments:"#c0605a" };
@@ -2164,6 +2437,41 @@ function nameEditor(cat, names, onChange){
       h("button.btn.btn-sm.btn-ghost",{onclick:()=>{ names.splice(i,1); onChange(); }},[iconEl("delete",{size:13})])
     ])),
     h("button.btn.btn-sm",{onclick:()=>{ names.push("New item"); onChange(); }},["+ Add name"])
+  ]);
+}
+function incomeNameEditor(state){
+  const names = state.settings.categoryNames.income;
+  return h("div", {}, [
+    ...names.map((name,i)=> h("div.field-row", { style:"align-items:center;" }, [
+      h("input",{ type:"text", value:name, oninput:(e)=>{
+        const oldName = names[i]; names[i] = e.target.value;
+        const arr = state.settings.variableIncomeNames;
+        const vi = arr.indexOf(oldName);
+        if(vi>-1) arr[vi] = e.target.value;
+        Store.mutate(s=>{});
+      } }),
+      h("label.checkbox-field", { style:"margin:0;white-space:nowrap;" }, [
+        h("input",{ type:"checkbox", checked: state.settings.variableIncomeNames.includes(name), onchange:(e)=>{
+          Store.mutate(s=>{
+            const arr = s.settings.variableIncomeNames;
+            const idx = arr.indexOf(name);
+            if(e.target.checked){ if(idx===-1) arr.push(name); }
+            else if(idx>-1) arr.splice(idx,1);
+          });
+          renderSettings();
+        } }),
+        h("span", {}, ["Variable income"])
+      ]),
+      h("button.btn.btn-sm.btn-ghost",{onclick:()=>{
+        Store.mutate(s=>{
+          const removed = s.settings.categoryNames.income.splice(i,1)[0];
+          const vi = s.settings.variableIncomeNames.indexOf(removed);
+          if(vi>-1) s.settings.variableIncomeNames.splice(vi,1);
+        });
+        renderSettings();
+      }},[iconEl("delete",{size:13})])
+    ])),
+    h("button.btn.btn-sm",{onclick:()=>{ names.push("New item"); Store.mutate(s=>{}); renderSettings(); }},["+ Add name"])
   ]);
 }
 function memberEditor(state){
@@ -2200,7 +2508,7 @@ function renderSettings(){
     ]);
   } else if(settingsTab==="categories"){
     panel = h("div", {}, [
-      h("div.card-grid", {}, CATEGORY_KEYS.map(cat=> h("div.card", {}, [ h("h3",{},[CATEGORY_LABELS[cat]]), nameEditor(cat, state.settings.categoryNames[cat], ()=>{ Store.mutate(s=>{}); }) ]))),
+      h("div.card-grid", {}, CATEGORY_KEYS.map(cat=> h("div.card", {}, [ h("h3",{},[CATEGORY_LABELS[cat]]), cat==="income" ? incomeNameEditor(state) : nameEditor(cat, state.settings.categoryNames[cat], ()=>{ Store.mutate(s=>{}); }) ]))),
       h("div.card", {}, [ h("h3",{},["Priority level names"]),
         ...state.settings.priorityNames.map((name,i)=> h("input",{type:"text",style:"margin-bottom:8px;",value:name,oninput:(e)=>{ state.settings.priorityNames[i]=e.target.value; Store.mutate(s=>{}); }}))
       ])
@@ -2223,6 +2531,23 @@ function downloadTextFile(filename, text, mime){
 }
 function markExported(){ Store.mutate(s=>{ s.settings.lastExportAt = todayISO(); }); }
 function exportJsonBackup(){ downloadTextFile("haven-backup-"+todayISO()+".json", JSON.stringify(Store.get(), null, 2)); markExported(); toast("JSON backup downloaded."); }
+// Web Share API with file support requires a secure context and isn't
+// available in every browser — this degrades gracefully to a no-op button
+// hidden entirely (see renderBackupPanel) rather than a broken/disabled one.
+function canShareFiles(){
+  try{
+    if(!navigator.share || !navigator.canShare) return false;
+    const testFile = new File(["x"], "test.json", { type:"application/json" });
+    return navigator.canShare({ files:[testFile] });
+  }catch(e){ return false; }
+}
+function shareBackup(){
+  const json = JSON.stringify(Store.get(), null, 2);
+  const file = new File([json], "haven-backup-"+todayISO()+".json", { type:"application/json" });
+  navigator.share({ files:[file], title:"Haven backup", text:"Haven budget backup — import this on your other device." })
+    .then(()=> markExported())
+    .catch(()=>{ /* user cancelled the share sheet, or it failed — the Export/Download button is always still there */ });
+}
 function csvEscape(v){ const s=String(v==null?"":v); return /[",\n]/.test(s) ? '"'+s.replace(/"/g,'""')+'"' : s; }
 function exportCsvBackup(){
   const state = Store.get();
@@ -2305,11 +2630,12 @@ function renderBackupPanel(){
       h("p.muted",{},["Haven never syncs to the cloud. Export a JSON file to move your data to another device, or to keep as a personal backup."]),
       h("div.btn-row", {}, [
         h("button.btn.btn-primary", { onclick:()=>exportJsonBackup() }, [iconEl("export",{size:14}), "Export JSON"]),
+        canShareFiles() ? h("button.btn.btn-blush", { onclick:()=>shareBackup() }, [iconEl("export",{size:14}), "Share backup…"]) : null,
         h("button.btn", { onclick:()=>exportCsvBackup() }, [iconEl("export",{size:14}), "Export CSV"]),
         h("label.btn", {}, [ iconEl("import",{size:14}), "Import JSON",
           h("input", { type:"file", accept:"application/json", style:"display:none;", onchange:(e)=>{ if(e.target.files[0]) importJsonBackup(e.target.files[0]); } })
         ])
-      ])
+      ].filter(Boolean))
     ]),
     h("div.card", {}, [
       h("h3",{},["Danger zone"]),
