@@ -409,6 +409,17 @@ const RECUR_HORIZON_YEARS = 2;
 const MEMBER_COLORS = ["#7d9b82","#e3b7bb","#c9a86a","#b98a63","#8fa9c9","#a690c4","#c98d93","#5f7d66"];
 const BACKUP_REMINDER_DAYS = 14;
 
+/* ===== SECTION: TRIAL / ACTIVATION (edit these two before distributing) =====
+   Haven is a single static HTML file with no server, so this is a soft,
+   honor-system gate — not real copy protection. Anyone with dev tools can
+   bypass it by editing localStorage or this source. It only has to be
+   convenient for a paying customer and mildly inconvenient for someone who
+   isn't, not airtight. */
+const TRIAL_DAYS = 2;
+const ACTIVATION_CODE = "HAVEN-UNLOCK"; // <-- change this, then give the same code to every customer
+const SELLER_CONTACT = ""; // optional — e.g. "support@yourshop.com", shown on the trial-expired screen
+const LICENSE_KEY = "haven.license.v1"; // separate from haven.data.v1 — survives Clear All Data and JSON import/export
+
 /* ===== SECTION: UTILITIES ===== */
 function uid(prefix){ return (prefix||"id")+"_"+Math.random().toString(36).slice(2,10)+Date.now().toString(36); }
 function clamp(n,lo,hi){ return Math.min(hi,Math.max(lo,n)); }
@@ -667,6 +678,82 @@ function confirmDialog(message, onYes, opts){
       h("button.btn.btn-danger", { onclick:()=>{ closeModal(); onYes(); } }, [opts.yesLabel || "Delete"])
     ]
   });
+}
+
+/* ===== SECTION: TRIAL / LICENSE STATE ===== */
+function loadLicenseState(){
+  try{
+    const raw = localStorage.getItem(LICENSE_KEY);
+    if(raw){ const parsed = JSON.parse(raw); if(parsed && typeof parsed==="object") return parsed; }
+  }catch(e){ /* storage unavailable or corrupt — fall through to a fresh trial */ }
+  return { trialStartedAt:null, unlocked:false };
+}
+function saveLicenseState(){
+  try{ localStorage.setItem(LICENSE_KEY, JSON.stringify(licenseState)); }
+  catch(e){ /* storage unavailable — trial just won't persist across reloads this session */ }
+}
+let licenseState = loadLicenseState();
+function ensureTrialStarted(){
+  if(!licenseState.trialStartedAt){ licenseState.trialStartedAt = todayISO(); saveLicenseState(); }
+}
+function trialDaysRemaining(){
+  if(!licenseState.trialStartedAt) return TRIAL_DAYS;
+  return Math.max(0, TRIAL_DAYS - daysBetween(licenseState.trialStartedAt, todayISO()));
+}
+function isLicensed(){ return !!licenseState.unlocked; }
+function isTrialExpired(){ return !isLicensed() && trialDaysRemaining()<=0; }
+function normalizeCode(s){ return String(s||"").trim().toUpperCase().replace(/\s+/g,""); }
+function tryActivate(code){
+  if(!code || normalizeCode(code) !== normalizeCode(ACTIVATION_CODE)) return false;
+  licenseState.unlocked = true;
+  saveLicenseState();
+  return true;
+}
+function openActivationModal(){
+  let codeInput = "";
+  function attempt(){
+    if(tryActivate(codeInput)){
+      toast("Haven unlocked — thank you!");
+      closeModal();
+      renderShell(); refreshCurrentRoute();
+    } else {
+      toast("That code doesn't look right. Double-check and try again.");
+    }
+  }
+  openModal({
+    title:"Enter activation code",
+    body:[
+      h("p",{},["Enter the activation code you received with your purchase to unlock Haven on this device."]),
+      field("Activation code", h("input", { type:"text", autofocus:true, oninput:(e)=>codeInput=e.target.value, onkeydown:(e)=>{ if(e.key==="Enter") attempt(); } }))
+    ],
+    footer:[
+      h("button.btn", { onclick:()=>closeModal() }, ["Cancel"]),
+      h("button.btn.btn-primary", { onclick:()=>attempt() }, ["Unlock"])
+    ]
+  });
+}
+function showTrialBlockScreen(){
+  document.getElementById("app").innerHTML = "";
+  let codeInput = "";
+  function attempt(){
+    if(tryActivate(codeInput)){ location.reload(); }
+    else { toast("That code doesn't look right. Double-check and try again."); }
+  }
+  const box = h("div.recovery-screen", {}, [
+    h("div.recovery-box", {}, [
+      h("h2",{},["Your free trial has ended"]),
+      h("p",{},["Haven's "+TRIAL_DAYS+"-day trial on this device is over. Enter the activation code you received with your purchase to keep going — your data is safe and will still be here once you unlock."]),
+      h("div.field", {}, [
+        h("label",{},["Activation code"]),
+        h("input", { type:"text", autofocus:true, oninput:(e)=>codeInput=e.target.value, onkeydown:(e)=>{ if(e.key==="Enter") attempt(); } })
+      ]),
+      h("div.btn-row", { style:"margin-top:10px;" }, [
+        h("button.btn.btn-primary", { onclick:()=>attempt() }, ["Unlock Haven"])
+      ]),
+      SELLER_CONTACT ? h("p.hint", { style:"margin-top:16px;" }, ["Don't have a code yet? Contact "+SELLER_CONTACT+" to purchase Haven."]) : null
+    ])
+  ]);
+  document.getElementById("app").appendChild(box);
 }
 
 /* ===== SECTION: RECOVERY SCREEN (corrupted / unreadable storage) ===== */
@@ -1057,6 +1144,11 @@ function renderMiniCalendar(){
 function daysSince(iso){ return daysBetween(iso, todayISO()); }
 function renderBanners(state){
   const nodes = [];
+  if(!isLicensed()){
+    const remaining = trialDaysRemaining();
+    nodes.push(h("div.banner.banner-gold", {}, [ "Free trial — "+remaining+" day"+(remaining===1?"":"s")+" left on this device.",
+      h("button", { onclick:()=>openActivationModal() }, ["Enter activation code"]) ]));
+  }
   if(window.__havenRecoveredFromBackup){
     nodes.push(h("div.banner.banner-gold", {}, [ "Your last save couldn't be read, so Haven recovered your previous backup instead. Nothing should be missing beyond your most recent edit.",
       h("button", { onclick:(e)=> e.target.closest(".banner").remove() }, ["Dismiss"]) ]));
@@ -1129,6 +1221,8 @@ function mountRoute(){ Router._current && ROUTE_HANDLERS[Router._current] && ROU
 function refreshCurrentRoute(){ refreshShellChrome(); mountRoute(); }
 
 function boot(){
+  ensureTrialStarted();
+  if(isTrialExpired()){ showTrialBlockScreen(); return; }
   const ok = Store.init();
   if(!ok) return; // recovery screen is showing; halt normal boot
   Store.mutate(s=> ensureRecurringHorizons(s), { silent:true });
@@ -2490,7 +2584,7 @@ function memberEditor(state){
 function renderSettings(){
   const state = Store.get();
   const tabs = h("div.btn-row", { style:"margin-bottom:16px;" }, [
-    ["general","General"],["categories","Categories & Priorities"],["members","Household Members"]
+    ["general","General"],["categories","Categories & Priorities"],["members","Household Members"],["license","License"]
   ].map(([id,label])=> h("button.btn"+(settingsTab===id?".btn-primary":".btn-ghost"), { onclick:()=>{ settingsTab=id; renderSettings(); } }, [label])));
 
   let panel;
@@ -2516,6 +2610,20 @@ function renderSettings(){
     ]);
   } else if(settingsTab==="members"){
     panel = h("div.card", {}, [ h("h3",{},["Household members"]), h("p.muted",{},["Assign a name and color to each person in your household. Colors are used as small initial avatars throughout Haven."]), memberEditor(state) ]);
+  } else if(settingsTab==="license"){
+    panel = h("div.card", {}, isLicensed() ? [
+      h("h3",{},["License"]),
+      h("p",{},[ h("span.badge.badge-paid",{style:"margin-right:8px;"},["Unlocked"]), "Haven is fully unlocked on this device. Thank you for your purchase!" ])
+    ] : [
+      h("h3",{},["License"]),
+      h("p",{},["Free trial: "+trialDaysRemaining()+" day(s) left on this device."]),
+      field("Activation code", h("input",{ type:"text", id:"licenseCodeInput" })),
+      h("button.btn.btn-primary", { onclick:()=>{
+        const val = document.getElementById("licenseCodeInput").value;
+        if(tryActivate(val)){ toast("Haven unlocked — thank you!"); renderSettings(); renderShell(); mountRoute(); }
+        else toast("That code doesn't look right. Double-check and try again.");
+      } }, ["Unlock"])
+    ]);
   }
   mountContent(h("div", {}, [ h("h2",{},["Settings"]), tabs, panel ]));
 }
